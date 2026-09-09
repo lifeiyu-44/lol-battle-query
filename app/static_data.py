@@ -58,11 +58,16 @@ GAME_TYPE_NAMES = {
 
 
 def queue_name(queue_id, game_mode, map_id=None):
+    try:
+        queue_id = int(queue_id)
+    except (TypeError, ValueError):
+        pass
     if queue_id in QUEUE_NAMES:
         return QUEUE_NAMES[queue_id]
     mode_names = {
         "CLASSIC": "召唤师峡谷",
         "ARAM": "极地大乱斗",
+        "KIWI": "海克斯大乱斗",
         "URF": "无限火力",
         "TFT": "云顶之弈",
         "NEXUSBLITZ": "闪击战",

@@ -52,7 +52,7 @@ class LcuClient:
         if not found:
             raise LcuError(
                 "未检测到英雄联盟客户端。请先通过 WeGame 启动并登录《英雄联盟》，"
-                "登录到客户端大厅后，再回到本工具点击重试。"
+                "登录到客户端大厅后，再回到本工具点击重试。只打开 WeGame 不够，无需进入对局；公开参考仍可使用。"
             )
         self.port, self.token = found
         auth = base64.b64encode(("riot:" + self.token).encode()).decode()
@@ -68,6 +68,19 @@ class LcuClient:
         return self.port is not None
 
     # ---------- 请求 ----------
+
+    def asset_data_url(self, path):
+        """让 WebView 能显示需要 LCU 认证的本地图标，不向前端暴露凭据。"""
+        if not self.port or not path.startswith("/lol-game-data/assets/") or ".." in path:
+            return ""
+        try:
+            response = self._session.get(
+                "https://127.0.0.1:{}{}".format(self.port, path), timeout=3, verify=False)
+            if response.ok and response.content.startswith(b"\x89PNG\r\n\x1a\n"):
+                return "data:image/png;base64," + base64.b64encode(response.content).decode("ascii")
+        except requests.RequestException:
+            pass
+        return ""
 
     def request(self, method, path, params=None, body=None, timeout=15):
         url = "https://127.0.0.1:{port}{path}".format(port=self.port, path=path)

@@ -8,6 +8,10 @@ import webview
 from .lcu import LcuClient, LcuError
 from . import query as Q
 from . import champions
+from . import augments as A
+from . import references
+from .friends import FriendDirectory, friend_status
+from .damage import DamageEvaluator
 
 
 def resource_path(rel):
@@ -20,6 +24,8 @@ def resource_path(rel):
 class Api:
     def __init__(self):
         self.lcu = LcuClient()
+        self.friends = FriendDirectory(self.lcu)
+        self.damage = DamageEvaluator(self.lcu)
 
     @staticmethod
     def _fail(msg):
@@ -47,6 +53,7 @@ class Api:
             if not self.lcu.connected:
                 self.lcu.connect()
             s = Q.find_summoner(self.lcu, q)
+            s["friendStatus"] = friend_status(self.friends.snapshot(), s["puuid"], s["summonerId"])
             return {"ok": True, "summoner": s}
         except LcuError as e:
             return self._fail(str(e))
@@ -59,29 +66,58 @@ class Api:
             for g in games:
                 g["championName"] = champions.champion_name(g["championId"])
                 g["avatar"] = champions.champion_avatar(g["championId"])
+                g["augmentNames"] = [
+                    A.augment_info(a, self.lcu) for a in g["augments"]
+                ]
             return {"ok": True, "games": games, "hasMore": has_more}
         except LcuError as e:
             return self._fail(str(e))
         except Exception as e:
             return self._fail("获取战绩失败：{}".format(e))
 
-    def get_game_detail(self, game_id):
+    def get_game_detail(self, game_id, my_puuid=""):
         try:
-            d = Q.game_detail(self.lcu, game_id)
+            d = Q.game_detail(self.lcu, game_id, my_puuid=my_puuid)
+            friends = self.friends.snapshot()
             for team in d["teams"]:
                 for p in team["players"]:
                     p["championName"] = champions.champion_name(p["championId"])
                     p["avatar"] = champions.champion_avatar(p["championId"])
                     p["itemIcons"] = [champions.item_icon(i) for i in p["items"]]
+                    p["friendStatus"] = friend_status(friends, p["puuid"], p.get("summonerId"))
             return {"ok": True, "game": d}
         except LcuError as e:
             return self._fail(str(e))
         except Exception as e:
             return self._fail("获取详情失败：{}".format(e))
 
+    def get_damage_evaluations(self, puuid, game_ids):
+        """每批最多五场，前端后台补齐十人数据，不阻塞战绩展示。"""
+        if not puuid or not isinstance(game_ids, list) or len(game_ids) > 5:
+            return self._fail("伤害评价参数无效")
+        if any(isinstance(i, bool) or not isinstance(i, int) or i <= 0 for i in game_ids):
+            return self._fail("对局编号无效")
+        return {"ok": True, "results": [
+            {"gameId": gid, "evaluation": self.damage.get(puuid, gid)} for gid in game_ids
+        ]}
+
     def get_champion_map(self):
         m = champions.get_champion_map()
-        return {"ok": True, "count": len(m)}
+        return {"ok": True, "count": len(m), "champions": [
+            {"id": int(cid), "name": champions.champion_name(cid)} for cid in m
+        ]}
+
+    def get_augment_reference(self, champion_id=0, force=False):
+        """无需启动客户端；外部请求只包含公开的英雄 ID。"""
+        try:
+            data = references.get_reference(champion_id, force)
+            client = self.lcu if self.lcu.connected else None
+            # Copy rows so image payloads never enter the public statistics cache.
+            data["rows"] = [{**row, "augment": A.augment_info(row["id"], client)}
+                            for row in data["rows"]]
+            return {"ok": True, "data": data}
+        except Exception as e:
+            return self._fail(str(e))
 
 
 def main():
@@ -94,7 +130,7 @@ def main():
         background_color="#010a13",
     )
     try:
-        webview.start()
+        webview.start(icon=resource_path("ui/app-icon.ico"))
     except Exception as e:
         # 最常见原因：系统缺少 WebView2 Runtime
         try:

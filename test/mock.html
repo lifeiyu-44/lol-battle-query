@@ -3,11 +3,12 @@
 <head>
 <meta charset="utf-8">
 <title>英雄联盟国服战绩查询</title>
+<link rel="icon" href="../app/ui/app-icon.ico">
 <link rel="stylesheet" href="../app/ui/style.css">
 </head>
 <body>
 <header>
-  <div class="logo"><span class="logo-mark">⚔</span>LOL 国服战绩查询</div>
+  <div class="logo"><img class="app-logo" src="../app/ui/app-icon.png" alt="乐✌认证">LOL 国服战绩查询</div>
   <div id="connBadge" class="badge offline">
     <span class="dot"></span><span id="connText">正在检测客户端…</span>
     <button id="retryBtn" class="mini" hidden>重试</button>
@@ -20,14 +21,54 @@
     <button id="searchBtn" class="primary">查 询</button>
   </section>
 
+  <section class="filter-row" aria-label="战绩筛选">
+    <label>对局类型 <select id="queueFilter">
+      <option value="all">全部对局</option>
+      <option value="mayhem">海克斯大乱斗</option>
+      <option value="aram">极地大乱斗</option>
+      <option value="ranked-solo">排位（单双排）</option>
+      <option value="ranked-flex">排位（灵活组排）</option>
+      <option value="normal">匹配模式</option>
+      <option value="arena">斗魂竞技场</option>
+      <option value="urf">无限火力 / 无限乱斗</option>
+      <option value="other">其他模式</option>
+    </select></label>
+    <label>开始日期 <input id="dateFrom" type="date"></label>
+    <label>结束日期 <input id="dateTo" type="date"></label>
+    <button id="resetFilters" class="ghost">重置筛选</button>
+    <span id="filterHint" class="filter-hint">按已加载战绩筛选，可继续加载更早对局</span>
+  </section>
+
   <div id="toast" class="toast" hidden></div>
+  <p class="connection-help">查询新战绩需要登录英雄联盟客户端并进入大厅，只开 WeGame 不够；无需进入对局。公开参考只需联网。</p>
 
   <section id="playerBar" class="player-bar" hidden></section>
   <section id="summaryCards" class="summary" hidden></section>
+  <section id="damageSummary" class="damage-summary" hidden>
+    <div><b>近期伤害评价</b> <span id="damageVerdict"></span><p id="damageProgress"></p></div>
+    <button id="retryDamage" class="ghost" hidden>重试伤害核验</button>
+  </section>
+  <details class="rating-rules"><summary>评分规则（娱乐参考）</summary><div id="ratingRules"></div></details>
+
+  <details id="augmentAnalysis" class="analysis-panel" open>
+    <summary>海克斯分析 <span>胜率 · 强度参考 · 英雄适配</span></summary>
+    <div class="analysis-controls">
+      <label>数据 <select id="analysisSource">
+        <option value="personal">个人战绩分析</option>
+        <option value="public">公开强度 / 英雄适配</option>
+      </select></label>
+      <label>英雄 <select id="analysisChampion"><option value="0">全部英雄</option></select></label>
+      <label>海克斯 <input id="analysisSearch" type="search" placeholder="搜索名称"></label>
+      <button id="refreshReference" class="ghost" hidden>刷新公开参考</button>
+    </div>
+    <p id="analysisNote" class="analysis-note"></p>
+    <div id="analysisBody" class="analysis-body"></div>
+  </details>
 
   <section id="listHead" class="list-head" hidden>
     <div id="listTitle" class="list-title">战绩</div>
     <div class="list-actions">
+      <select id="matchSort" aria-label="战绩排序"><option value="date">最新对局在前</option><option value="score">评分从高到低</option></select>
       <button id="loadMoreBtn" class="ghost">加载更多</button>
       <button id="loadAllBtn" class="ghost">加载全部战绩</button>
       <button id="exportBtn" class="ghost">导出 CSV</button>
@@ -43,46 +84,64 @@
   <div class="detail-panel">
     <div class="detail-head">
       <span id="detailTitle">对局详情</span>
+      <select id="detailSort" aria-label="队伍内排序"><option value="default">队伍默认顺序</option><option value="score">队伍内评分从高到低</option></select>
       <button id="detailClose" class="ghost">关闭</button>
     </div>
     <div id="detailBody" class="detail-body">加载中…</div>
   </div>
 </div>
 
+<script src="../app/ui/ratings.js"></script>
+<script src="../app/ui/damage.js"></script>
+<script src="../app/ui/analysis.js"></script>
 <script>
+const mockAugments = [
+  {id: 1007, name: '大力', rarity: 'kSilver', icon: 'https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/assets/ux/cherry/augments/icons/bluntforce_small.png'},
+  {id: 1002, name: '尖端发明家', rarity: 'kGold', icon: 'https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/assets/ux/cherry/augments/icons/apexinventor_small.png'},
+  {id: 1006, name: '利刃华尔兹', rarity: 'kPrismatic', icon: 'https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/assets/ux/cherry/augments/icons/bladewaltz_small.png'},
+];
 window.pywebview = { api: {
   get_status: async () => ({ok:true, connected:true, me:{name:'测试召唤师', level:138}}),
-  search_player: async (q) => ({ok:true, summoner:{puuid:'abc', summonerId:'s1', name:q, tagLine:'CN1', level:245, iconId:0}}),
+  search_player: async (q) => ({ok:true, summoner:{puuid:'abc', summonerId:'s1', name:q, friendStatus:'friend', tagLine:'CN1', level:245, iconId:0}}),
   get_matches: async (puuid, beg) => {
     const heroes = [
       [1,'安妮·黑暗之女','Annie'],[412,'锤石·魂锁典狱长','Thresh'],[238,'亚索·疾风剑豪','Yasuo'],
       [99,'卢锡安·圣枪游侠','Lucian'],[86,'盖伦·德玛西亚之力','Garen']
     ];
-    const modes = ['排位（单双排）','匹配模式','极地大乱斗'];
+    const modes = ['海克斯大乱斗','排位（单双排）','匹配模式','极地大乱斗'];
+    const queues = [2400, 420, 430, 450];
     const games = [];
     for (let i = beg; i < Math.min(beg+20, 45); i++) {
       const h = heroes[i % heroes.length], w = i % 3 !== 1;
-      games.push({gameId: 1000000+i, queueId: i%3===2?450:420, mode: modes[i%3],
+      games.push({gameId: 1000000+i, queueId: queues[i%4], mode: modes[i%4],
+        augmentNames: i%4===0 ? mockAugments : [],
         creation: Date.now() - i*3600*1000*7, durationSec: 1200 + (i%5)*180, win: w, remake: i===7,
         championId: h[0], championName: h[1], avatar: 'https://game.gtimg.cn/images/lol/act/img/champion/' + h[2] + '.png',
         kills: 3+i%9, deaths: 2+i%6, assists: 5+i%12, cs: 150+i*7, gold: 9000+i*300, damage: 15000+i*900, level: 13+i%6});
     }
     return {ok:true, games, hasMore: beg+20 < 45};
   },
+  get_damage_evaluations: async (puuid, ids) => ({ok:true, results:ids.map(id=>({gameId:id,
+    evaluation:{status:'ok',isTop:(id-1000000)%4===0,rank:(id-1000000)%4===0?1:5,maxDamage:40000,damage:20000,tied:false,players:10}}))}),
   get_game_detail: async (id) => {
+    const mayhem = (id - 1000000) % 4 === 0;
     const myTeam = [['安妮·黑暗之女','Annie'],['亚索·疾风剑豪','Yasuo'],['卢锡安·圣枪游侠','Lucian'],['盖伦·德玛西亚之力','Garen'],['锤石·魂锁典狱长','Thresh']];
     const foeTeam = [['亚托克斯·暗裔剑魔','Aatrox'],['艾翁·铸星龙王','Ivern'],['劫·影流之主','Zed'],['厄运小姐·赏金猎人','MissFortune'],['索拉卡·众星之子','Soraka']];
     const mk = (arr, win, tag) => ({teamId: win?100:200, players: arr.map((h,i)=>({
-      name: tag+i, championId: 1, championName: h[0],
+      name: tag+i, friendStatus: i===0?'friend':i===1?'self':i===2?'unknown':'not_friend', tagLine: 'CN1', championId: 1, championName: h[0],
+      augments: mayhem ? mockAugments : [],
       avatar: 'https://game.gtimg.cn/images/lol/act/img/champion/'+h[1]+'.png',
       kills: 8-i, deaths: 4, assists: 10, cs: 200+i*20, gold: 11000, damage: 22000, level: 16,
       items:[3089,3020,3157,3165,3135,3340],
       itemIcons:[3089,3020,3157,3165,3135,3340].map(x=>'https://game.gtimg.cn/images/lol/act/img/item/'+x+'.png'),
       win: win}))});
-    return {ok:true, game:{gameId:id, mode:'排位（单双排）', creation: Date.now()-7200000, durationSec: 1836,
+    return {ok:true, game:{gameId:id, mode:mayhem?'海克斯大乱斗':'排位（单双排）', creation: Date.now()-7200000, durationSec: 1836,
       teams:[mk(myTeam, true, '队友'), mk(foeTeam, false, '对手')]}};
   },
-  get_champion_map: async () => ({ok:true, count:173}),
+  get_champion_map: async () => ({ok:true, count:2, champions:[{id:266,name:'暗裔剑魔·亚托克斯'},{id:103,name:'九尾妖狐·阿狸'}]}),
+  get_augment_reference: async (id) => ({ok:true, data:{source:'ARAMGG', sourceUrl:'https://aramgg.com/en/augments',
+    patch:'26.17', scope:'演示数据，仅用于界面测试', championId:id, minimumSample:id?255:null,
+    fetchedAt:'2026-09-09T00:00:00Z', rows:mockAugments.map(a=>({id:a.id,augment:a,winRate:52.31,tier:'T2',sampleSize:id?1000:null}))}}),
 }};
 </script>
 <script src="../app/ui/app.js"></script>

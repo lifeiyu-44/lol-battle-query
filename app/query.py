@@ -4,6 +4,8 @@ from urllib.parse import quote
 
 from .static_data import queue_name
 from .lcu import LcuError
+from .augments import clean_augments, augment_info
+from .damage import rankings, evaluate
 
 PAGE_SIZE = 20
 MAX_TOTAL = 2000  # 防御性上限，避免无限拉取
@@ -50,8 +52,9 @@ def find_summoner(lcu, query):
     tried.append("按名字搜索")
 
     raise LcuError(
-        "未找到玩家「{}」。可能原因：① ID 拼写有误；② 对方不在你当前登录的大区"
-        "（跨大区玩家需输入完整 名称#Tag）；③ 客户端版本接口变更。".format(query)
+        "未找到玩家「{}」。当前客户端版本已下线「仅按名字」查询接口"
+        "（实测 422/404），请输入完整 名称#Tag，例如「峡谷之巅#5177」；"
+        "Tag 可在对方生涯页或对局载入界面查看。".format(query)
     )
 
 
@@ -78,23 +81,29 @@ def match_page(lcu, puuid, beg_index):
     if code != 200 or not data:
         raise LcuError("战绩接口返回异常（HTTP {}），请稍后重试。".format(code))
     games = (data.get("games") or {}).get("games") or []
-    slim = [slim_game(g) for g in games]
+    slim = [slim_game(g, puuid) for g in games]
     has_more = len(slim) >= PAGE_SIZE
     return slim, has_more
 
 
-def slim_game(g):
+def slim_game(g, my_puuid=""):
     """把 LCU 战绩条目精简为前端渲染所需字段。"""
+    participants = g.get("participants") or []
+    identities = {p.get("participantId"): (p.get("player") or {}).get("puuid")
+                  for p in g.get("participantIdentities") or []}
+    me = next((p for p in participants if my_puuid and my_puuid in (
+        p.get("puuid"), (p.get("stats") or {}).get("puuid"),
+        identities.get(p.get("participantId")))), None)
     try:
-        me = next(
-            p for p in g.get("participants", [])
-            if p.get("stats", {}).get("puuid") or p.get("puuid")
-        )
+        if me is None and my_puuid and len(participants) > 1:
+            raise LcuError("战绩中未找到被查询玩家，无法计算其个人统计。")
+        if me is not None:
+            selected = me
+        else:
+            selected = next(iter(participants))
+        me = selected
     except StopIteration:
         me = {}
-        # 找不到自己：取第一个参与者兜底
-        if g.get("participants"):
-            me = g["participants"][0]
 
     stats = me.get("stats", {}) or {}
     duration_ms = g.get("gameDuration") or 0
@@ -110,7 +119,7 @@ def slim_game(g):
         "queueId": g.get("queueId"),
         "mode": queue_name(g.get("queueId"), g.get("gameMode"), g.get("mapId")),
         "mapId": g.get("mapId"),
-        "creation": g.get("gameCreation"),
+        "creation": g.get("gameCreation") or g.get("gameCreationDate"),
         "durationSec": duration_s,
         "win": bool(stats.get("win")),
         "remake": duration_s < 300 and bool(stats.get("teamEarlySurrendered")),
@@ -122,21 +131,45 @@ def slim_game(g):
         "level": stats.get("champLevel", 0) or 0,
         "lane": stats.get("lane") or "",
         "role": stats.get("role") or "",
+        "augments": clean_augments(stats),
     }
 
 
 def game_detail(lcu, game_id, my_puuid=""):
-    """单局完整对局信息（两队成员）。"""
+    """单局完整对局信息（两队成员）。
+
+    当前客户端版本参与者本体不再带名字，名字/puuid 在
+    participantIdentities[].player 里，需要按 participantId 联表。
+    my_puuid 用于标出被查询玩家所在队伍（前端据此显示我方/敌方）。
+    """
     code, data = lcu.request("GET", "/lol-match-history/v1/games/{}".format(game_id))
     if code != 200 or not data:
         raise LcuError("单局详情接口返回异常（HTTP {}）。".format(code))
     duration_ms = data.get("gameDuration") or 0
     duration_s = duration_ms // 1000 if duration_ms > 10000 else duration_ms
+    identities = {}
+    for pi in data.get("participantIdentities", []):
+        player = pi.get("player") or {}
+        identities[pi.get("participantId")] = {
+            "gameName": player.get("gameName") or player.get("summonerName") or "",
+            "tagLine": player.get("tagLine") or "",
+            "puuid": player.get("puuid") or "",
+            "summonerId": player.get("summonerId") or "",
+        }
     teams = {100: [], 200: []}
+    damage_status, damage_rows = rankings(data)
+    my_team_id = None
     for p in data.get("participants", []):
         st = p.get("stats", {}) or {}
+        ident = identities.get(p.get("participantId")) or {}
+        if my_puuid and ident.get("puuid") == my_puuid:
+            my_team_id = p.get("teamId")
+        augments = clean_augments(st)
         teams.setdefault(p.get("teamId", 100), []).append({
-            "name": p.get("summonerName") or "",
+            "name": ident.get("gameName") or p.get("summonerName") or "",
+            "tagLine": ident.get("tagLine") or "",
+            "puuid": ident.get("puuid") or "",
+            "summonerId": ident.get("summonerId") or p.get("summonerId") or "",
             "championId": p.get("championId", 0),
             "kills": st.get("kills", 0) or 0,
             "deaths": st.get("deaths", 0) or 0,
@@ -145,15 +178,23 @@ def game_detail(lcu, game_id, my_puuid=""):
                   + (st.get("neutralMinionsKilled", 0) or 0),
             "gold": st.get("goldEarned", 0) or 0,
             "damage": st.get("totalDamageDealtToChampions", 0) or 0,
+            "damageEvaluation": damage_rows.get(p.get("participantId"), damage_status),
             "level": st.get("champLevel", 0) or 0,
             "items": [st.get("item{}".format(i), 0) or 0 for i in range(6)],
+            "augments": [
+                augment_info(a, lcu) for a in augments
+            ],
             "win": bool(st.get("win")),
         })
     return {
         "gameId": game_id,
         "mode": queue_name(data.get("queueId"), data.get("gameMode"), data.get("mapId")),
-        "creation": data.get("gameCreation"),
+        "creation": data.get("gameCreation") or data.get("gameCreationDate"),
         "durationSec": duration_s,
+        "myTeamId": my_team_id,
+        "damageEvaluation": evaluate(data, my_puuid),
+        "remake": duration_s < 300 and any(
+            (p.get("stats") or {}).get("teamEarlySurrendered") for p in data.get("participants", [])),
         "teams": [ {"teamId": t, "players": teams.get(t, [])} for t in (100, 200) ],
     }
 

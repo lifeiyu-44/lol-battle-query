@@ -1,0 +1,21 @@
+const assert = require('node:assert/strict');
+const D = require('../app/ui/damage.js');
+const games = Array.from({length: 10}, (_,i) => ({gameId:i+1, creation:1700000000+i,
+  damageEvaluation:{status:'ok',isTop:i<3}}));
+let report = D.summarize(games);
+assert.equal(report.percent,30);
+assert.equal(report.verdict,'达标：伤害最高占比 ≥30%');
+games[2].damageEvaluation.isTop = false;
+assert.match(D.summarize(games).verdict,/^未达标/);
+games[2].damageEvaluation = {status:'unknown'};
+assert.equal(D.summarize(games).verdict,'统计未完成');
+assert.equal(D.summarize(games).verified,9);
+assert.equal(D.summarize([]).percent,null);
+games[2].damageEvaluation = {status:'unsupported'};
+assert.equal(D.summarize(games).skipped,1);
+assert.equal(D.summarize([...games,games[0],{...games[0],gameId:50,remake:true}]).total,10);
+const many = Array.from({length:25}, (_,i)=>({...games[0],gameId:i+100,creation:1700000000+i}));
+assert.equal(D.recent(many).length,20);
+assert.equal(D.recent(many)[0].gameId,124);
+assert.equal(D.recent(many)[19].gameId,105);
+console.log('Damage analysis passed: exact 30% boundary, missing-data verdicts, deduplication, exclusions and latest-20 scope.');
