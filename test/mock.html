@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>英雄联盟国服战绩查询</title>
+<link rel="stylesheet" href="../app/ui/style.css">
+</head>
+<body>
+<header>
+  <div class="logo"><span class="logo-mark">⚔</span>LOL 国服战绩查询</div>
+  <div id="connBadge" class="badge offline">
+    <span class="dot"></span><span id="connText">正在检测客户端…</span>
+    <button id="retryBtn" class="mini" hidden>重试</button>
+  </div>
+</header>
+
+<main>
+  <section class="search-row">
+    <input id="queryInput" placeholder="输入玩家 ID 查战绩，支持 名字#Tag（仅能查当前登录大区及跨区匹配到的玩家）" autocomplete="off">
+    <button id="searchBtn" class="primary">查 询</button>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <section id="playerBar" class="player-bar" hidden></section>
+  <section id="summaryCards" class="summary" hidden></section>
+
+  <section id="listHead" class="list-head" hidden>
+    <div id="listTitle" class="list-title">战绩</div>
+    <div class="list-actions">
+      <button id="loadMoreBtn" class="ghost">加载更多</button>
+      <button id="loadAllBtn" class="ghost">加载全部战绩</button>
+      <button id="exportBtn" class="ghost">导出 CSV</button>
+    </div>
+  </section>
+
+  <section id="matchList" class="match-list"></section>
+  <div id="loadingAll" class="loading-all" hidden></div>
+  <div id="emptyHint" class="empty" hidden>输入玩家 ID 开始查询</div>
+</main>
+
+<div id="detailMask" class="detail-mask" hidden>
+  <div class="detail-panel">
+    <div class="detail-head">
+      <span id="detailTitle">对局详情</span>
+      <button id="detailClose" class="ghost">关闭</button>
+    </div>
+    <div id="detailBody" class="detail-body">加载中…</div>
+  </div>
+</div>
+
+<script>
+window.pywebview = { api: {
+  get_status: async () => ({ok:true, connected:true, me:{name:'测试召唤师', level:138}}),
+  search_player: async (q) => ({ok:true, summoner:{puuid:'abc', summonerId:'s1', name:q, tagLine:'CN1', level:245, iconId:0}}),
+  get_matches: async (puuid, beg) => {
+    const heroes = [
+      [1,'安妮·黑暗之女','Annie'],[412,'锤石·魂锁典狱长','Thresh'],[238,'亚索·疾风剑豪','Yasuo'],
+      [99,'卢锡安·圣枪游侠','Lucian'],[86,'盖伦·德玛西亚之力','Garen']
+    ];
+    const modes = ['排位（单双排）','匹配模式','极地大乱斗'];
+    const games = [];
+    for (let i = beg; i < Math.min(beg+20, 45); i++) {
+      const h = heroes[i % heroes.length], w = i % 3 !== 1;
+      games.push({gameId: 1000000+i, queueId: i%3===2?450:420, mode: modes[i%3],
+        creation: Date.now() - i*3600*1000*7, durationSec: 1200 + (i%5)*180, win: w, remake: i===7,
+        championId: h[0], championName: h[1], avatar: 'https://game.gtimg.cn/images/lol/act/img/champion/' + h[2] + '.png',
+        kills: 3+i%9, deaths: 2+i%6, assists: 5+i%12, cs: 150+i*7, gold: 9000+i*300, damage: 15000+i*900, level: 13+i%6});
+    }
+    return {ok:true, games, hasMore: beg+20 < 45};
+  },
+  get_game_detail: async (id) => {
+    const myTeam = [['安妮·黑暗之女','Annie'],['亚索·疾风剑豪','Yasuo'],['卢锡安·圣枪游侠','Lucian'],['盖伦·德玛西亚之力','Garen'],['锤石·魂锁典狱长','Thresh']];
+    const foeTeam = [['亚托克斯·暗裔剑魔','Aatrox'],['艾翁·铸星龙王','Ivern'],['劫·影流之主','Zed'],['厄运小姐·赏金猎人','MissFortune'],['索拉卡·众星之子','Soraka']];
+    const mk = (arr, win, tag) => ({teamId: win?100:200, players: arr.map((h,i)=>({
+      name: tag+i, championId: 1, championName: h[0],
+      avatar: 'https://game.gtimg.cn/images/lol/act/img/champion/'+h[1]+'.png',
+      kills: 8-i, deaths: 4, assists: 10, cs: 200+i*20, gold: 11000, damage: 22000, level: 16,
+      items:[3089,3020,3157,3165,3135,3340],
+      itemIcons:[3089,3020,3157,3165,3135,3340].map(x=>'https://game.gtimg.cn/images/lol/act/img/item/'+x+'.png'),
+      win: win}))});
+    return {ok:true, game:{gameId:id, mode:'排位（单双排）', creation: Date.now()-7200000, durationSec: 1836,
+      teams:[mk(myTeam, true, '队友'), mk(foeTeam, false, '对手')]}};
+  },
+  get_champion_map: async () => ({ok:true, count:173}),
+}};
+</script>
+<script src="../app/ui/app.js"></script>
+</body>
+</html>

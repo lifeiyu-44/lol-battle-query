@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>英雄联盟国服战绩查询</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="logo"><span class="logo-mark">⚔</span>LOL 国服战绩查询</div>
+  <div id="connBadge" class="badge offline">
+    <span class="dot"></span><span id="connText">正在检测客户端…</span>
+    <button id="retryBtn" class="mini" hidden>重试</button>
+  </div>
+</header>
+
+<main>
+  <section class="search-row">
+    <input id="queryInput" placeholder="输入玩家 ID 查战绩，支持 名字#Tag（仅能查当前登录大区及跨区匹配到的玩家）" autocomplete="off">
+    <button id="searchBtn" class="primary">查 询</button>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <section id="playerBar" class="player-bar" hidden></section>
+  <section id="summaryCards" class="summary" hidden></section>
+
+  <section id="listHead" class="list-head" hidden>
+    <div id="listTitle" class="list-title">战绩</div>
+    <div class="list-actions">
+      <button id="loadMoreBtn" class="ghost">加载更多</button>
+      <button id="loadAllBtn" class="ghost">加载全部战绩</button>
+      <button id="exportBtn" class="ghost">导出 CSV</button>
+    </div>
+  </section>
+
+  <section id="matchList" class="match-list"></section>
+  <div id="loadingAll" class="loading-all" hidden></div>
+  <div id="emptyHint" class="empty" hidden>输入玩家 ID 开始查询</div>
+</main>
+
+<div id="detailMask" class="detail-mask" hidden>
+  <div class="detail-panel">
+    <div class="detail-head">
+      <span id="detailTitle">对局详情</span>
+      <button id="detailClose" class="ghost">关闭</button>
+    </div>
+    <div id="detailBody" class="detail-body">加载中…</div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
