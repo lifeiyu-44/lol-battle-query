@@ -54,6 +54,12 @@ class Api:
         self._notice_position = None
         self._notice_position_lock = threading.Lock()
         self._notice_position_saved = 0.0
+        # 托盘：点关闭默认最小化到托盘，托盘菜单里可改/退出。
+        self._settings = self.load_app_settings()
+        self._tray_icon = None
+        self._tray_available = False
+        self._tray_hinted = False
+        self._exiting = False
         # 后台预热英雄名称/头像映射，避免首次查询时同步等待网络资料。
         champions.warmup()
 
@@ -236,9 +242,104 @@ class Api:
         except Exception as e:
             return self._fail(str(e))
 
+    # ---------- 托盘与关闭行为 ----------
+
+    def _settings_path(self):
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "LOL战绩查询" / "app-settings.json"
+
+    def load_app_settings(self):
+        try:
+            data = json.loads(self._settings_path().read_text(encoding="utf-8"))
+            return {"close_to_tray": bool(data.get("close_to_tray", True))}
+        except (OSError, ValueError, AttributeError):
+            return {"close_to_tray": True}  # 默认：点关闭最小化到托盘
+
+    def save_app_settings(self):
+        try:
+            path = self._settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = str(path) + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as f:
+                json.dump(self._settings, f)
+            os.replace(temporary, path)
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def _on_main_closing(self):
+        """点窗口关闭：默认取消关闭并隐藏到托盘；关闭了该选项或正在退出时放行。"""
+        if self._tray_available and self._settings.get("close_to_tray") and not self._exiting:
+            try:
+                self._main_window.hide()
+            except Exception:
+                return None
+            self._hint_tray_once()
+            return False  # 取消关闭，程序留在托盘
+        return None
+
+    def _hint_tray_once(self):
+        if self._tray_hinted or not self._tray_icon:
+            return
+        self._tray_hinted = True
+        try:
+            self._tray_icon.notify("已最小化到托盘，双击图标可重新打开；右键可退出。", "恁🐎战绩查询")
+        except Exception:
+            pass
+
+    def _show_main(self, icon=None, item=None):
+        if self._main_window:
+            try:
+                self._main_window.show()
+                self._main_window.restore()
+            except Exception:
+                pass
+
+    def _toggle_close_to_tray(self, icon=None, item=None):
+        self._settings["close_to_tray"] = not self._settings.get("close_to_tray")
+        self.save_app_settings()
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
+
+    def _exit_app(self, icon=None, item=None):
+        self._exiting = True
+        self.close_game_notice()
+        if self._main_window:
+            try:
+                self._main_window.destroy()
+            except Exception:
+                pass
+        if icon:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+
+    def _setup_tray(self):
+        """系统托盘图标（pystray）；初始化失败时点关闭直接退出，不影响主流程。"""
+        try:
+            from PIL import Image
+            import pystray
+            image = Image.open(resource_path("ui/app-icon.png"))
+
+            def checked(item):
+                return bool(self._settings.get("close_to_tray"))
+
+            menu = pystray.Menu(
+                pystray.MenuItem("显示主界面", self._show_main, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("关闭时最小化到托盘", self._toggle_close_to_tray, checked=checked),
+                pystray.MenuItem("退出", self._exit_app),
+            )
+            self._tray_icon = pystray.Icon("lol-battle-query", image, "恁🐎战绩查询", menu)
+            threading.Thread(target=self._tray_icon.run, daemon=True).start()
+            self._tray_available = True
+        except Exception as e:
+            print("tray unavailable:", e)
+
     NOTICE_SIZE = (460, 340)
     # 每次打包发版递增：界面左下角会显示，方便确认跑的是哪一版。
-    VERSION = "2026-09-10.7"
+    VERSION = "2026-09-10.8"
 
     def get_version(self):
         return {"ok": True, "version": self.VERSION}
@@ -395,6 +496,9 @@ def main():
         background_color="#080b14",
     )
     api._main_window.events.closed += api.close_game_notice
+    # 点关闭 → 最小化到托盘（可在托盘菜单改为直接退出），由托盘菜单提供「退出」。
+    api._main_window.events.closing += api._on_main_closing
+    api._setup_tray()
     try:
         webview.start(icon=resource_path("ui/app-icon.ico"))
     except Exception as e:
