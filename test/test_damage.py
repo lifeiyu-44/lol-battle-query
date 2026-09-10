@@ -18,6 +18,8 @@ class DamageTests(unittest.TestCase):
         self.assertTrue(evaluate(g, 'target')['isTop'])
         self.assertFalse(evaluate(g, 'team-top')['isTop'])
         self.assertEqual(evaluate(g, 'team-top')['rank'], 6)
+        self.assertEqual(evaluate(g, 'target')['teamShare'], 25)
+        self.assertAlmostEqual(evaluate(g, 'team-top')['teamShare'], 100/3)
         self.assertEqual(evaluate(g, 'other')['status'], 'unknown')
 
     def test_ties_and_zero_damage(self):
@@ -28,6 +30,7 @@ class DamageTests(unittest.TestCase):
         for p in g['participants']:
             p['stats']['totalDamageDealtToChampions'] = 0
         self.assertFalse(evaluate(g, 'target')['isTop'])
+        self.assertIsNone(evaluate(g, 'target')['teamShare'])
 
     def test_missing_or_corrupt_data_is_unknown(self):
         g = fixture()

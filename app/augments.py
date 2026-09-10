@@ -7,6 +7,7 @@ import threading
 import time
 
 import requests
+from .augment_descriptions import get_description
 
 DATA_PATH = "/lol-game-data/assets/v1/cherry-augments.json"
 CDRAGON = "https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/"
@@ -115,8 +116,33 @@ def augment_info(augment_id, lcu=None):
                                          path.split("/lol-game-data/assets/", 1)[1].lower())
             icon = _icons[key]
     return {"id": augment_id, "name": info.get("name") or "未知海克斯（资料待更新）",
-            "icon": icon, "rarity": info.get("rarity", ""), "resolved": bool(info.get("name"))}
+            "icon": icon, "rarity": info.get("rarity", ""), "resolved": bool(info.get("name")),
+            **get_description(augment_id)}
 
 
 def augment_label(augment_id):
     return augment_info(augment_id)["name"]
+
+
+def catalog(lcu=None):
+    """全部强化的名称/稀有度/图标，用于前端「优选海克斯」的搜索添加。
+
+    图标直接用 CDN 地址，不为整张表逐个读客户端资源（那会发出上千次请求）。
+    """
+    rows = []
+    for key, info in get_augment_map(lcu).items():
+        try:
+            augment_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        name = info.get("name")
+        if augment_id <= 0 or not name:
+            continue
+        path = info.get("iconPath") or ""
+        icon = ""
+        if path.startswith("/lol-game-data/assets/"):
+            icon = CDRAGON + "default/" + path.split("/lol-game-data/assets/", 1)[1].lower()
+        rows.append({"id": augment_id, "name": name,
+                     "rarity": info.get("rarity") or "", "icon": icon})
+    rows.sort(key=lambda row: (row["name"], row["id"]))
+    return rows

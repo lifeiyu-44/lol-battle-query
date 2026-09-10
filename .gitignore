@@ -10,3 +10,12 @@ dist/
 
 # 运行时数据缓存（可从腾讯 CDN 重新拉取）
 app/champions_cache.json
+
+# 本地调试与临时产物
+dist_new/
+*.log
+*_tmp.py
+*_tmp.html
+*_tmp.png
+seg_tmp.ps1
+champ_monitor.py

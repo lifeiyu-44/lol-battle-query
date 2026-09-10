@@ -1,10 +1,13 @@
 @echo off
-rem 一键打包：生成 dist\LOL战绩查询.exe（单文件，可直接分享）
+chcp 65001 >nul
+rem One-click build (single-file exe).
+rem The app name contains Chinese + emoji, so it lives inside build.spec (UTF-8).
+rem Do NOT put --name on the command line: cmd reads args as GBK and the emoji
+rem would turn into garbage. This file is kept ASCII-only on purpose.
 cd /d "%~dp0"
-set PYI_ARGS=--noconfirm --clean --onefile --windowed --icon "app\ui\app-icon.ico" --name "LOL战绩查询" --add-data "app\ui;ui" --hidden-import webview.platforms.edgechromium --hidden-import psutil
-if exist app\champions_cache.json set PYI_ARGS=%PYI_ARGS% --add-data "app\champions_cache.json;."
-if exist app\augments_cache.json set PYI_ARGS=%PYI_ARGS% --add-data "app\augments_cache.json;."
-.venv\Scripts\pyinstaller.exe %PYI_ARGS% run.py
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
+.venv\Scripts\pyinstaller.exe --noconfirm --clean build.spec
 echo.
-echo 打包完成：dist\LOL战绩查询.exe
+echo Build done. Single-file exe is in the dist folder.
 pause

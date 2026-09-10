@@ -10,6 +10,11 @@ const state = {
   nextBeg: 0,
   loading: false,    // 加载中（防并发）
   loadingAll: false,
+  stopLoading: false,
+  historyError: "",
+  historySource: "",
+  historyNote: "",
+  historyFetchedAt: 0,
   statusTimer: null,
   pageLoading: false,
   analysisCatalog: [],
@@ -18,8 +23,11 @@ const state = {
   referenceError: "",
   referenceSeq: 0,
   detailGame: null,
+  detailPuuid: "",   // 详情按哪个玩家标记“我方”（可能来自英雄专项页的玩家）
   damageBusy: false,
   damageEpoch: 0,
+  autoSelfAttempted: false,
+  page: "query",     // 当前页面：query / game / augment / records
 };
 
 /* ---------- 工具 ---------- */
@@ -60,10 +68,17 @@ function queueGroup(g) {
   return "other";
 }
 
+function historyLimit() {
+  const n = Number($("historyLimit").value);
+  return [20, 50, 100, 200, 300, 500].includes(n) ? n : 20;
+}
+function historyGames() { return state.games.slice(0, historyLimit()); }
+function canLoadHistory() { return state.hasMore && state.games.length < historyLimit(); }
+
 function visibleGames() {
   const mode = $("queueFilter").value;
   const from = $("dateFrom").value, to = $("dateTo").value;
-  return state.games.filter(g => {
+  return historyGames().filter(g => {
     if (mode !== "all" && queueGroup(g) !== mode) return false;
     const day = fmtDay(g.creation);
     if ((from || to) && !day) return false;
@@ -112,10 +127,18 @@ async function refreshStatus() {
     btn.hidden = true;
     clearTimeout(state.statusTimer);
     hideToast();
+    RecentSearches.setCurrent(res.me);
+    state.statusTimer = setTimeout(refreshStatus, 15000);
+    if (!state.autoSelfAttempted && res.me?.puuid && !state.player && !state.loading && !$("queryInput").value.trim()) {
+      state.autoSelfAttempted = true;
+      $("queryInput").value = res.me.name + (res.me.tagLine ? '#' + res.me.tagLine : '');
+      await doSearch(res.me, {remember:false});
+    }
   } else {
     badge.className = "badge offline";
     $("connText").textContent = "未检测到英雄联盟客户端";
     btn.hidden = false;
+    RecentSearches.setCurrent(null);
     toast(res.error || "未检测到客户端，请先登录英雄联盟客户端。", true);
     clearTimeout(state.statusTimer);
     state.statusTimer = setTimeout(refreshStatus, 8000); // 自动重试
@@ -124,53 +147,92 @@ async function refreshStatus() {
 
 /* ---------- 查询 ---------- */
 
-async function doSearch() {
+async function doSearch(playerOverride = null, {remember=true} = {}) {
   const q = $("queryInput").value.trim();
-  if (!q) { toast("请输入玩家 ID"); return; }
+  if (!q && !playerOverride?.puuid) { toast("请输入玩家 ID"); return; }
   if (state.loading || state.pageLoading || state.loadingAll) return;
   state.loading = true;
+  $("historyLimit").disabled = true;
   $("searchBtn").disabled = true;
   $("searchBtn").textContent = "查询中…";
+  RecentSearches.render();
   try {
-    const res = await window.pywebview.api.search_player(q);
+    const res = playerOverride?.refreshIdentity ? await window.pywebview.api.get_saved_player(playerOverride.puuid) :
+      playerOverride?.puuid ? {ok: true, summoner: playerOverride} : await window.pywebview.api.search_player(q);
     if (!res.ok) { toast(res.error); return; }
     state.player = res.summoner;
+    if (playerOverride?.refreshIdentity) $("queryInput").value = state.player.name + (state.player.tagLine ? '#' + state.player.tagLine : '');
     state.damageEpoch++;
     state.damageBusy = false;
     state.games = [];
-    state.hasMore = false;
+    state.hasMore = true;
+    state.nextBeg = 0;
+    state.historyError = "";
+    state.historySource = "";
+    state.historyNote = "";
     renderPlayer();
-    await loadPage(0);
+    if (await loadPage(0)) {
+      if (remember) await RecentSearches.remember(state.player);
+      await loadAll();
+    }
+  } catch (error) {
+    toast(error.message || '查询失败，请重试');
   } finally {
     state.loading = false;
+    $("historyLimit").disabled = false;
     $("searchBtn").disabled = false;
     $("searchBtn").textContent = "查 询";
+    renderAll();
+    RecentSearches.render();
   }
 }
 
+const HISTORY_PAGE_SIZE = 20;   // 单次请求上限（接口按 20 场一页）
+const HISTORY_CONCURRENCY = 3;  // 同一批并发拉取的页数
+
+/* 单页请求：只取数据，不碰游标和界面状态（供并发批处理使用）。 */
+async function fetchPage(beg, count) {
+  const res = await window.pywebview.api.get_matches(state.player.puuid, beg, count);
+  return {res, rows: (res.games || []).slice(0, count)};
+}
+
+/* 把一页结果并入列表；必须按 beg 递增顺序调用，游标推进与逐页串行完全一致。 */
+function mergePage(beg, res, rows) {
+  state.historySource = res.source || "";
+  state.historyNote = res.note || "";
+  if (beg === 0) { state.games = []; state.historyFetchedAt = Date.now(); }
+  // 重复页是分页异常，不能据此声称已经取完历史。保留游标供重试。
+  const seen = new Set(state.games.map(g => String(g.gameId)));
+  const fresh = rows.filter(g => {
+    if (seen.has(String(g.gameId))) return false;
+    seen.add(String(g.gameId));
+    return true;
+  });
+  if (rows.length && !fresh.length) {
+    state.historyError = "接口返回重复战绩，分页未完成";
+    return false;
+  }
+  state.games.push(...fresh);
+  state.nextBeg = beg + rows.length;
+  state.hasMore = res.hasMore && fresh.length > 0 && state.nextBeg < 500;
+  return true;
+}
+
 async function loadPage(beg) {
-  if (state.pageLoading || !state.player) return false;
+  if (state.pageLoading || !state.player || state.games.length >= historyLimit()) return false;
   state.pageLoading = true;
+  $("historyLimit").disabled = true;
+  state.historyError = "";
   $("loadMoreBtn").disabled = true;
   $("loadAllBtn").disabled = true;
   try {
-    const res = await window.pywebview.api.get_matches(state.player.puuid, beg);
-    if (!res.ok) { toast(res.error); return false; }
-    if (beg === 0) state.games = [];
-    // 服务端分页参数在当前客户端已失效（任何 begIndex 都返回最新 20 场），
-    // 按 gameId 去重；整页全部重复即视为没有更多，避免「加载全部」无限重复。
-    const seen = new Set(state.games.map(g => g.gameId));
-    const fresh = res.games.filter(g => {
-      if (seen.has(g.gameId)) return false;
-      seen.add(g.gameId);
-      return true;
-    });
-    state.games.push(...fresh);
-    state.nextBeg = beg + res.games.length;
-    state.hasMore = res.hasMore && fresh.length > 0 && state.nextBeg < 2000;
-    return true;
+    const count = Math.min(HISTORY_PAGE_SIZE, historyLimit() - beg);
+    const {res, rows} = await fetchPage(beg, count);
+    if (!res.ok) { state.historyError = res.error || "加载失败"; toast(state.historyError); return false; }
+    return mergePage(beg, res, rows);
   } catch (error) {
-    toast(`加载战绩失败：${error.message || error}`);
+    state.historyError = `加载战绩失败：${error.message || error}`;
+    toast(state.historyError);
     return false;
   } finally {
     state.pageLoading = false;
@@ -178,25 +240,44 @@ async function loadPage(beg) {
   }
 }
 
+/* 批量加载：一次并发拉多页、再按页序合并。请求总数不变但不再逐页干等，
+   500 场由 25 次串行往返降到 9 批，实测约快 2~3 倍。 */
 async function loadAll() {
-  if (state.loadingAll || state.pageLoading || !state.player) return;
+  if (state.loadingAll || state.pageLoading || !state.player || !canLoadHistory()) return;
   state.loadingAll = true;
-  $("loadAllBtn").disabled = true;
+  state.stopLoading = false;
+  state.historyError = "";
+  $("historyLimit").disabled = true;
   $("loadMoreBtn").disabled = true;
-  const box = $("loadingAll");
-  box.hidden = false;
+  $("loadAllBtn").disabled = true;
+  renderAll();
   try {
-    while (state.hasMore) {
-      if (!await loadPage(state.nextBeg)) { box.hidden = true; return; }
-      box.textContent = `已加载 ${state.games.length} 场战绩…`;
-      if (state.games.length > 2000) { toast("已达拉取上限"); break; }
+    while (canLoadHistory() && !state.stopLoading) {
+      const batch = [];
+      for (let i = 0; i < HISTORY_CONCURRENCY; i++) {
+        const beg = state.nextBeg + i * HISTORY_PAGE_SIZE;
+        const count = Math.min(HISTORY_PAGE_SIZE, historyLimit() - beg);
+        if (count <= 0 || beg + count > 500) break;
+        batch.push({beg, promise: fetchPage(beg, count).catch(() => null)});
+      }
+      if (!batch.length) break;
+      let failed = false;
+      for (const job of batch) {
+        const result = await job.promise;
+        if (state.stopLoading) { failed = true; break; }
+        if (!result || !result.res || !result.res.ok) {
+          state.historyError = (result && result.res && result.res.error) || "加载失败";
+          failed = true;
+          break;
+        }
+        if (!mergePage(job.beg, result.res, result.rows)) { failed = true; break; }
+        // 批量加载期间只刷新进度文字，列表在全部取完后统一重建。
+        renderAll();
+      }
+      if (failed) break;
     }
-    if (!state.hasMore && state.games.length <= 20) {
-      box.textContent = `已加载 ${state.games.length} 场，客户端未返回更多战绩`;
-    } else {
-      box.textContent = `加载完成，共 ${state.games.length} 场战绩`;
-    }
-    setTimeout(() => { box.hidden = true; }, 2500);
+  } catch (error) {
+    state.historyError = `加载战绩失败：${error.message || error}`;
   } finally {
     state.loadingAll = false;
     renderAll();
@@ -265,7 +346,7 @@ function renderSummary(games) {
           <span class="wr">${((c.w * 100) / c.n).toFixed(0)}%</span>
         </span>`).join("") || '<span style="color:#55637a">—</span>'}
       </div></div>`;
-  $("playerBar").querySelector(".gcount").textContent = state.games.length;
+  $("playerBar").querySelector(".gcount").textContent = historyGames().length;
   const rating = MatchRating.average(games);
   $("playerRating").innerHTML = rating.score === null ? "暂无可评分对局" :
     `当前筛选综合评分 ${ratingBadge(rating)} <span>基于 ${rating.count} 场，排除重开</span>`;
@@ -275,6 +356,12 @@ function friendBadge(status) {
   const labels = {self: "本人", friend: "好友", not_friend: "非好友", unknown: "好友状态未知"};
   const key = Object.hasOwn(labels, status) ? status : "unknown";
   return `<span class="friend-badge friend-${key}" title="按当前登录客户端账号的好友列表判断，最多缓存 60 秒；读取失败时显示未知">${labels[key]}</span>`;
+}
+
+function honorBadge(game, participantId = game.participantId) {
+  const award = MatchRating.award(game, participantId);
+  if (!award) return '';
+  return `<span class="honor-badge honor-${award.label.toLowerCase()}" title="${escapeHtml(award.reason)}">${award.tied ? '并列 ' : ''}${award.label}<small>估算</small></span>`;
 }
 
 function ratingBadge(rating) {
@@ -302,16 +389,23 @@ function fmtDay(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-/* 海克斯强化符文小徽章行 */
+/* 海克斯强化符文小徽章行：悬浮显示稀有度、名称与详细效果描述 */
 function augmentChips(augmentNames, mayhem = false) {
   const list = augmentNames || [];
   if (!list.length) return mayhem ? '<div class="aug-empty">客户端未提供海克斯记录</div>' : "";
   const rarities = { kSilver: "白银", kGold: "黄金", kPrismatic: "棱彩" };
   return `<div class="aug-chips" aria-label="海克斯强化">${list.map(a => {
-    const name = escapeHtml(a.name || "未知海克斯（资料待更新）");
+    const rawName = a.name || "未知海克斯（资料待更新）";
+    const name = escapeHtml(rawName);
     const rarity = Object.hasOwn(rarities, a.rarity) ? a.rarity : "unknown";
+    const rarityLabel = rarities[rarity] || "资料待更新";
     const icon = /^(https:\/\/|data:image\/png;base64,)/.test(a.icon || "") ? a.icon : "";
-    return `<span class="aug-chip ${rarity}" title="${rarities[rarity] || '资料待更新'} · ${name} · ID ${escapeHtml(a.id)}">
+    const description = String(a.description || "").trim() ||
+      "该海克斯的详细效果暂未收录，请以游戏内说明为准。";
+    const tip = [rarityLabel + " · " + rawName, description,
+      a.dynamicValues ? "标注数值随等级或局内情况变化。" : "", "ID " + (a.id ?? "未知")]
+      .filter(Boolean).join("\n\n");
+    return `<span class="aug-chip ${rarity}" title="${escapeHtml(tip)}">
       ${icon ? `<img src="${escapeHtml(icon)}" alt="${name}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">` : ""}
       <span class="aug-placeholder" ${icon ? 'hidden' : ''} aria-hidden="true">⬡</span><span>${name}</span></span>`;
   }).join("")}</div>`;
@@ -325,6 +419,7 @@ function matchCard(g) {
   const champ = document.createElement("div");
   champ.className = "mc-champ";
   champ.appendChild(avatarEl(g.avatar, g.championName, "ph"));
+  HeroAnalysis.bind(champ, state.player, g.championId, g.championName, g.avatar);
   if (g.level) {
     const lv = document.createElement("span");
     lv.className = "lvl"; lv.textContent = "Lv." + g.level;
@@ -340,6 +435,7 @@ function matchCard(g) {
     <div class="meta">${winWord} · <time>${fmtTime(g.creation)}</time></div>
     ${augmentChips(g.augmentNames, queueGroup(g) === "mayhem")}`;
   main.querySelector(".cname").textContent = g.championName;
+  main.querySelector(".cname").insertAdjacentHTML("beforeend", honorBadge(g));
 
   const kda = document.createElement("div");
   kda.className = "mc-kda";
@@ -352,7 +448,7 @@ function matchCard(g) {
   stats.innerHTML = `
     <div class="mc-stat"><div class="v">${g.cs}</div><div class="k">补刀</div></div>
     <div class="mc-stat"><div class="v">${(g.gold / 1000).toFixed(1)}k</div><div class="k">金币</div></div>
-    <div class="mc-stat"><div class="v">${(g.damage / 1000).toFixed(1)}k</div><div class="k">伤害</div>${damageBadge(g.damageEvaluation, g.remake)}</div>`;
+    <div class="mc-stat"><div class="v">${(g.damage / 1000).toFixed(1)}k</div><div class="k">伤害</div>${damageShare(g.damageEvaluation)}${damageBadge(g.damageEvaluation, g.remake)}</div>`;
 
   const right = document.createElement("div");
   right.className = "mc-right";
@@ -368,7 +464,59 @@ function matchCard(g) {
   return card;
 }
 
+/* 战绩列表只在内容变化时重建：几百场对局反复全量重建是筛选卡顿的主因。
+   批量加载时如果只是尾部多了新取到的对局，就只补新卡片，让列表边取边长出来。 */
+const listRender = { key: "", ids: [], sort: "", puuid: null };
+function renderMatchList(games) {
+  const sort = $("matchSort").value;
+  const puuid = state.player ? state.player.puuid : null;
+  const ids = games.map(g => String(g.gameId));
+  const key = puuid + "|" + sort + "|" + games.map(g =>
+    `${g.gameId}:${g.win ? 1 : 0}:${g.remake ? 1 : 0}:${g.damageEvaluation?.status ?? ""}`).join(",");
+  if (key === listRender.key) return;
+  const appendable = puuid === listRender.puuid && sort === listRender.sort &&
+    listRender.ids.length > 0 && ids.length > listRender.ids.length &&
+    listRender.ids.every((id, index) => ids[index] === id);
+  const fragment = document.createDocumentFragment();
+  if (appendable) {
+    games.slice(listRender.ids.length).forEach(g => {
+      const card = matchCard(g);
+      card.classList.add("fresh");
+      fragment.appendChild(card);
+    });
+    $("matchList").appendChild(fragment);
+  } else {
+    games.forEach(g => fragment.appendChild(matchCard(g)));
+    $("matchList").replaceChildren(fragment);
+  }
+  listRender.key = key;
+  listRender.ids = ids;
+  listRender.sort = sort;
+  listRender.puuid = puuid;
+}
+
+/* 加载态：进度条 + 转圈 + 文案；拿不到这些节点时静默跳过（假数据页没有）。 */
+function renderLoading() {
+  const box = $("loadingAll");
+  if (!box) return;
+  const busy = Boolean(state.loadingAll || state.pageLoading);
+  box.hidden = !busy;
+  if (!busy) return;
+  const text = $("loadingText"), fill = $("loadingFill");
+  const done = historyGames().length, target = historyLimit();
+  if (text) {
+    text.textContent = state.loadingAll
+      ? `正在加载战绩 ${done} / ${target} 场${state.stopLoading ? ' · 正在停止…' : ' · 可点「停止加载」'}`
+      : `正在读取下一页…（已取得 ${done} 场）`;
+  }
+  if (fill) {
+    const ratio = !state.hasMore ? 1 : (target ? done / target : 0);
+    fill.style.width = `${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%`;
+  }
+}
+
 function renderAll() {
+  RecentSearches.render();
   if (!state.player) return;
   const games = visibleGames();
   games.sort((a, b) => {
@@ -378,24 +526,42 @@ function renderAll() {
     }
     return (timestamp(b.creation) || 0) - (timestamp(a.creation) || 0);
   });
-  const list = $("matchList");
-  list.innerHTML = "";
-  games.forEach(g => list.appendChild(matchCard(g)));
-  $("listHead").hidden = false;
-  $("emptyHint").hidden = games.length > 0;
+  // 批量加载期间也渲染列表：只是尾部多了新取到的对局时增量补卡片，看起来是边取边长。
+  renderMatchList(games);
+  $("emptyHint").hidden = state.loadingAll || games.length > 0;
   $("emptyHint").textContent = "已加载战绩中没有符合条件的对局，可调整筛选或加载更多。";
+  renderLoading();
+  $("listHead").hidden = false;
   const invalidDates = $("dateFrom").value && $("dateTo").value && $("dateFrom").value > $("dateTo").value;
   $("filterHint").textContent = invalidDates ? "开始日期不能晚于结束日期" :
-    `显示 ${games.length} / ${state.games.length} 场 · 日期按本地时间筛选（含结束日）`;
-  $("loadMoreBtn").disabled = !state.hasMore || state.loadingAll || state.pageLoading;
-  $("loadAllBtn").disabled = state.loadingAll || state.pageLoading || !state.hasMore;
+    `显示 ${games.length} / ${historyGames().length} 场 · 日期按本地时间筛选（含结束日）`;
+  $("loadMoreBtn").disabled = !canLoadHistory() || state.loadingAll || state.pageLoading || state.loading;
+  $("loadAllBtn").disabled = state.loadingAll || state.pageLoading || !canLoadHistory() || state.loading;
+  $("historyLimit").disabled = state.loading || state.loadingAll || state.pageLoading;
+  $("stopLoadBtn").hidden = !state.loadingAll;
+  $("stopLoadBtn").disabled = state.stopLoading;
+  $("historyProgress").hidden = false;
+  const progress = `已取得 ${historyGames().length} / ${historyLimit()} 场（先取最近战绩，再按类型和日期筛选）`;
+  $("historyProgress").textContent = progress + (state.historyError ? ` · ${state.historyError}，可重试加载` :
+    state.loadingAll || state.pageLoading ? ' · 正在加载…' : state.games.length >= historyLimit() ? ' · 已达到所选上限' :
+    !state.hasMore ? ` · 已显示本次可获取的全部 ${historyGames().length} 场` : state.stopLoading ? ' · 已停止，可继续加载' : ' · 可继续加载') +
+    (state.historySource === 'sgp' ? ' · 完整历史接口' : '') +
+    (state.historyNote ? ` · ${state.historyNote}` : '');
   $("exportBtn").disabled = games.length === 0;
   const tag = state.player.tagLine ? "#" + state.player.tagLine : "";
-  $("listTitle").textContent = `${state.player.name}${tag} 的战绩（筛选 ${games.length} / 已加载 ${state.games.length} 场）`;
+  $("listTitle").textContent = `${state.player.name}${tag} 的战绩（筛选 ${games.length} / 已加载 ${historyGames().length} 场）`;
   renderSummary(games);
   renderDamageSummary();
   renderAnalysis();
   ensureDamageAnalysis();
+}
+
+function damageShare(evaluation) {
+  const share = evaluation?.teamShare;
+  if (evaluation?.status !== 'ok' || !Number.isFinite(share)) {
+    return '<div class="damage-share unknown" title="需要完整队伍伤害数据；全队总伤害为零时无法计算">队伍占比未知</div>';
+  }
+  return `<div class="damage-share" title="你的对英雄伤害 ÷ 全队对英雄总伤害">队伍占比 ${share.toFixed(1)}%</div>`;
 }
 
 /* ---------- 最近二十场全场伤害最高占比 ---------- */
@@ -456,16 +622,22 @@ async function ensureDamageAnalysis() {
 
 /* ---------- 海克斯胜率、强度及英雄适配 ---------- */
 
+const analysisChoices = { key: "" };
 function analysisChampions() {
   const select = $("analysisChampion"), old = select.value;
   const isPublic = $("analysisSource").value === "public";
-  const played = state.games.filter(AugmentAnalysis.mayhem).map(g => ({id: g.championId, name: g.championName}));
+  const played = historyGames().filter(AugmentAnalysis.mayhem).map(g => ({id: g.championId, name: g.championName}));
   const choices = new Map((isPublic ? [...state.analysisCatalog, ...played] : played).map(c => [String(c.id), c]));
-  select.innerHTML = '<option value="0">全部英雄</option>';
-  [...choices.values()].sort((a, b) => (a.name || "").localeCompare(b.name || "", "zh-CN")).forEach(c => {
-    const option = document.createElement("option");
-    option.value = c.id; option.textContent = c.name; select.appendChild(option);
-  });
+  // 选项集合没变就不重建，避免每页加载都重排 170+ 个 option，也保住用户正在操作的下拉框。
+  const key = (isPublic ? "public|" : "personal|") + [...choices.keys()].sort().join(",");
+  if (key !== analysisChoices.key) {
+    analysisChoices.key = key;
+    select.innerHTML = '<option value="0">全部英雄</option>';
+    [...choices.values()].sort((a, b) => (a.name || "").localeCompare(b.name || "", "zh-CN")).forEach(c => {
+      const option = document.createElement("option");
+      option.value = c.id; option.textContent = c.name; select.appendChild(option);
+    });
+  }
   select.value = choices.has(old) ? old : "0";
 }
 
@@ -474,12 +646,25 @@ function performanceHtml(p) {
   return `<span title="${delta}；未选取 ${p.withoutCount} 场">${p.label}</span>`;
 }
 
+const analysisRender = { key: "" };
 function renderAnalysis() {
+  // 批量加载期间只提示，不重建表格；加载结束后的渲染会带最新数据。
+  if (state.loadingAll) {
+    $("analysisNote").textContent = "正在加载战绩，加载完成后自动更新海克斯分析…";
+    $("refreshReference").hidden = $("analysisSource").value !== "public";
+    return;
+  }
   analysisChampions();
   const body = $("analysisBody"), note = $("analysisNote");
   const cid = Number($("analysisChampion").value);
   const search = $("analysisSearch").value.trim().toLocaleLowerCase();
   const isPublic = $("analysisSource").value === "public";
+  // 输入没变就跳过重建；个人模式的指纹覆盖筛选结果本身（含对局 ID 哈希）。
+  const scope = isPublic
+    ? `public|${cid}|${search}|${state.referenceLoading}|${state.referenceError}|${state.reference?.fetchedEpoch ?? ""}`
+    : `personal|${state.player?.puuid}|${cid}|${search}|${historyGames().length}|${visibleGames().reduce((h, g) => (h * 31 + Number(g.gameId)) >>> 0, 7)}`;
+  if (scope === analysisRender.key) return;
+  analysisRender.key = scope;
   $("refreshReference").hidden = !isPublic;
   $("refreshReference").disabled = state.referenceLoading;
   if (!isPublic) {
@@ -563,19 +748,26 @@ async function copyPlayerId(text, button) {
   }
 }
 
-async function openDetail(gameId) {
+let detailSeq = 0;   // 丢弃过期的详情响应（快速连点多场时）
+
+async function openDetail(gameId, puuid) {
+  // puuid 可选：英雄专项页会传该页的玩家，保证「我方」标记正确。
+  const myPuuid = puuid === undefined ? (state.player ? (state.player.puuid || "") : "") : puuid;
+  const seq = ++detailSeq;
   state.detailGame = null;
+  state.detailPuuid = myPuuid;
   $("detailMask").hidden = false;
   $("detailBody").textContent = "加载中…";
-  const myPuuid = state.player ? (state.player.puuid || "") : "";
   const res = await window.pywebview.api.get_game_detail(gameId, myPuuid);
-  if (state.player?.puuid !== myPuuid) return;
+  if (seq !== detailSeq) return;
+  if (puuid === undefined && (state.player ? (state.player.puuid || "") : "") !== myPuuid) return;
   if (!res.ok) { $("detailBody").textContent = res.error; return; }
   const g = res.game;
   const match = state.games.find(m => String(m.gameId) === String(gameId));
-  if (match && g.damageEvaluation) {
-    match.damageEvaluation = g.damageEvaluation;
-    if (g.damageEvaluation.status === 'remake') match.remake = true;
+  if (match && g.ratingParticipants) match.ratingParticipants = g.ratingParticipants;
+  if (match && (g.damageEvaluation || g.ratingParticipants)) {
+    if (g.damageEvaluation) match.damageEvaluation = g.damageEvaluation;
+    if (g.damageEvaluation?.status === 'remake') match.remake = true;
     renderAll();
   }
   state.detailGame = g;
@@ -583,14 +775,14 @@ async function openDetail(gameId) {
 }
 
 function renderDetail(g) {
-  const myPuuid = state.player ? (state.player.puuid || "") : "";
+  const myPuuid = state.detailPuuid || (state.player ? (state.player.puuid || "") : "");
   $("detailTitle").textContent =
     `${g.mode} · ${fmtDuration(g.durationSec)} · ${fmtTime(g.creation)}`;
   const body = $("detailBody");
   body.innerHTML = "";
   const notice = document.createElement("p");
   notice.className = "detail-friend-note";
-  notice.textContent = "好友关系相对于当前登录客户端账号；评分为自定义娱乐参考，悬停可看计算依据。";
+  notice.textContent = "好友关系相对于当前登录客户端账号；评分为自定义娱乐参考，悬停可看计算依据。MVP / SVP 为本工具估算，非官方称号。";
   body.appendChild(notice);
   // 「我方」= 被查询玩家所在队伍；接口没给 myTeamId 时回退为 team 100
   const myTeamId = g.myTeamId || 100;
@@ -621,9 +813,12 @@ function renderDetail(g) {
         <td class="dkda"><b>${p.kills}</b> / <span class="d">${p.deaths}</span> / <b>${p.assists}</b></td>
         <td>补刀 ${p.cs}</td>
         <td>${(p.gold / 1000).toFixed(1)}k 金币</td>
-        <td>${(p.damage / 1000).toFixed(1)}k 伤害<div>${damageBadge(p.damageEvaluation, g.remake)}</div></td>
+        <td>${(p.damage / 1000).toFixed(1)}k 伤害<div>${damageBadge(p.damageEvaluation, g.remake)}${damageShare(p.damageEvaluation)}</div></td>
         <td><div class="items">${items}</div></td>`;
       tr.querySelector(".dchamp span").textContent = p.championName || p.name;
+      const heroAvatar = avatarEl(p.avatar, p.championName, 'detail-champ-avatar');
+      tr.querySelector(".dchamp img").replaceWith(heroAvatar);
+      HeroAnalysis.bind(heroAvatar, p, p.championId, p.championName, p.avatar);
       tr.querySelector(".pname").textContent = pname;
       tr.querySelector(".pname").title = pname;
       const copy = document.createElement("button");
@@ -638,6 +833,7 @@ function renderDetail(g) {
       const status = document.createElement("span");
       status.innerHTML = friendBadge(p.friendStatus);
       tr.querySelector(".dchamp").appendChild(status);
+      tr.querySelector(".dchamp").insertAdjacentHTML("beforeend", honorBadge(g, p.participantId));
       const rating = document.createElement("div");
       rating.className = "detail-rating";
       rating.innerHTML = ratingBadge(MatchRating.rate({...p, durationSec:g.durationSec, remake:g.remake}));
@@ -664,7 +860,7 @@ function renderDetail(g) {
 function exportCsv() {
   const games = visibleGames();
   if (!games.length) return;
-  const head = "英雄,模式,结果,击杀,死亡,助攻,KDA,补刀,金币,对英雄伤害,时长(分),对局时间,海克斯强化,gameId,娱乐评分,评分等级,全场伤害排名,全场伤害最高";
+  const head = "英雄,模式,结果,击杀,死亡,助攻,KDA,补刀,金币,对英雄伤害,时长(分),对局时间,海克斯强化,gameId,娱乐评分,评分等级,全场伤害排名,全场伤害最高,队伍伤害占比(%),MVP/SVP(本工具估算)";
   const rows = games.map(g => [
     g.championName, g.mode, g.remake ? "重开" : (g.win ? "胜" : "负"),
     g.kills, g.deaths, g.assists, kdaRatio(g.kills, g.deaths, g.assists),
@@ -674,6 +870,8 @@ function exportCsv() {
     g.damageEvaluation?.status === 'ok' && !g.remake ? g.damageEvaluation.rank : '',
     g.remake ? '重开不计' : g.damageEvaluation?.status === 'ok' ?
       (g.damageEvaluation.isTop ? (g.damageEvaluation.tied ? '并列最高' : '是') : '否') : '未核验或不适用',
+    g.damageEvaluation?.status === 'ok' && Number.isFinite(g.damageEvaluation.teamShare) ? g.damageEvaluation.teamShare.toFixed(1) : '',
+    MatchRating.award(g) ? `${MatchRating.award(g).tied ? '并列 ' : ''}${MatchRating.award(g).label}（估算）` : '',
   ].map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(","));
   const csv = "\ufeff" + head + "\n" + rows.join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -686,7 +884,39 @@ function exportCsv() {
 
 /* ---------- 启动 ---------- */
 
+/* ---------- 页面切换（查询 / 对局 / 海克斯 / 记录） ---------- */
+
+const PAGE_NAMES = ["query", "game", "augment"];
+
+function showPage(name) {
+  const target = PAGE_NAMES.includes(name) ? name : "query";
+  state.page = target;
+  const pages = document.querySelectorAll(".page");
+  // 兼容旧版单页结构：没有 .page 容器时不隐藏任何内容（假数据页继续可用）。
+  if (pages.length) pages.forEach(page => { page.hidden = page.dataset.page !== target; });
+  document.querySelectorAll(".rail-link").forEach(link => {
+    link.classList.toggle("active", link.dataset.page === target);
+  });
+  const scroller = document.querySelector("main");
+  if (scroller) scroller.scrollTop = 0;
+}
+
+/* 关闭任意浮层后统一回到默认首页（查询）。 */
+function closeDetail() {
+  if ($("detailMask").hidden) return;
+  $("detailMask").hidden = true;
+  showPage("query");
+}
+
 function bindEvents() {
+  document.querySelectorAll('.rail-link').forEach(link => link.addEventListener('click', event => {
+    event.preventDefault();
+    if (link.dataset.page === 'game' && $('currentGame')) $('currentGame').open = true;
+    showPage(link.dataset.page);
+  }));
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeDetail();
+  });
   $("retryDamage").addEventListener("click", () => {
     DamageAnalysis.recent(visibleGames()).forEach(g => {
       if (g.damageEvaluation?.status === 'unknown') delete g.damageEvaluation;
@@ -721,24 +951,39 @@ function bindEvents() {
   });
   $("loadMoreBtn").addEventListener("click", () => loadPage(state.nextBeg));
   $("loadAllBtn").addEventListener("click", loadAll);
+  $("stopLoadBtn").addEventListener("click", () => { state.stopLoading = true; renderAll(); });
+  $("historyLimit").addEventListener("change", () => {
+    state.stopLoading = false;
+    renderAll();
+    loadAll();
+  });
   $("exportBtn").addEventListener("click", exportCsv);
   $("retryBtn").addEventListener("click", () => { hideToast(); refreshStatus(); });
-  $("detailClose").addEventListener("click", () => { $("detailMask").hidden = true; });
+  $("detailClose").addEventListener("click", closeDetail);
   $("detailMask").addEventListener("click", (e) => {
-    if (e.target === $("detailMask")) $("detailMask").hidden = true;
+    if (e.target === $("detailMask")) closeDetail();
   });
 }
 
 function init() {
+  RecentSearches.init();
   bindEvents();
+  CurrentGame.init();
+  if (window.AugmentPrefs) AugmentPrefs.init();
+  showPage("query");
   $("ratingRules").textContent = MatchRating.formula + " 等级从高到低：" +
     MatchRating.tiers.map((t, i) => `${t.label}（${t.minimum}${i === 0 ? '–100' : '–<' + MatchRating.tiers[i-1].minimum} 分）`).join('；') +
-    "。综合评分取当前筛选对局的均分，重开和资料不足的对局不计分。不同模式节奏不同，本评分不是官方实力或段位。";
+    "。综合评分取当前筛选对局的均分，重开和资料不足的对局不计分。不同模式节奏不同，本评分不是官方实力或段位。MVP/SVP 按队内最高娱乐评分估算：胜方 MVP、败方 SVP；同分并列，重开或十人资料不完整时不评选。";
   refreshStatus();
   renderAnalysis();
+  window.pywebview.api.get_version().then(res => {
+    const tag = $("buildTag");
+    if (tag && res && res.ok) tag.textContent = "v" + res.version;
+  }).catch(() => {});
   window.pywebview.api.get_champion_map().then(res => {
     if (res.ok) state.analysisCatalog = res.champions || [];
     renderAnalysis();
+    if (window.AugmentPrefs) AugmentPrefs.refreshChampions();
   }).catch(() => {});
 }
 

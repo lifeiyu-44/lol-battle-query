@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from app import augment_prefs as P
 from app import augments as A
 from app.lcu import LcuClient
 from app.query import game_detail, slim_game
@@ -88,6 +90,46 @@ class AugmentTests(unittest.TestCase):
             detail = game_detail(lcu, 1)
             self.assertEqual(detail['teams'][0]['players'][0]['augments'][0]['icon'], 'png')
             info.assert_called_once_with(1007, lcu)
+
+    def test_catalog_lists_names_with_cdn_icons(self):
+        """优选清单的搜索项：整张表都用 CDN 图标，不逐个读客户端资源。"""
+        with patch.object(A.requests, 'get', side_effect=requests.ConnectionError):
+            rows = A.catalog()
+        by_id = {row['id']: row for row in rows}
+        self.assertEqual(by_id[1007]['name'], '大力')
+        self.assertTrue(by_id[1007]['icon'].endswith(
+            '/assets/ux/cherry/augments/icons/bluntforce_small.png'))
+        self.assertTrue(all(row['name'] for row in rows))
+
+
+class AugmentPreferenceTests(unittest.TestCase):
+    """优选海克斯清单：只接受合法 ID，保持用户排序，按英雄限量保存。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = patch.dict(os.environ, {'LOCALAPPDATA': self.tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_normalize_drops_invalid_and_keeps_order(self):
+        self.assertEqual(P.normalize({
+            '266': [1006, 1006, 'bad', 0, -1, 1002], 'x': [1], '0': [1], '103': [], 5: ['7'],
+        }), {'266': [1006, 1002], '5': [7]})
+        self.assertEqual(P.normalize('not-a-dict'), {})
+
+    def test_roundtrip_and_per_champion_limit(self):
+        saved = P.save({'266': [3, 1, 2]})
+        self.assertEqual(saved['266'], [3, 1, 2])
+        self.assertEqual(P.load(), saved)
+        capped = P.save({'266': list(range(1, 40))})
+        self.assertEqual(len(capped['266']), P.MAX_AUGMENTS)
+
+    def test_broken_file_is_treated_as_empty(self):
+        path = Path(self.tmp.name) / 'LOL战绩查询' / 'augment-preferences.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{ not json', encoding='utf-8')
+        self.assertEqual(P.load(), {})
 
 
 if __name__ == '__main__':

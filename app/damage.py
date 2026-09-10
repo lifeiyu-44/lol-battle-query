@@ -24,8 +24,13 @@ def rankings(game):
     maximum = max(damage.values())
     ties = sum(v == maximum for v in damage.values())
     results = {}
+    team_by_player = {p["participantId"]: p["teamId"] for p in participants}
+    team_totals = {team: sum(damage[p["participantId"]] for p in participants if p["teamId"] == team)
+                   for team in (100, 200)}
     for pid, value in damage.items():
+        team_total = team_totals[team_by_player[pid]]
         results[pid] = {"status": "ok", "damage": value, "maxDamage": maximum,
+                        "teamDamage": team_total, "teamShare": value * 100 / team_total if team_total > 0 else None,
                         "rank": 1 + sum(v > value for v in damage.values()),
                         "isTop": value == maximum and maximum > 0,
                         "tied": value == maximum and ties > 1 and maximum > 0,

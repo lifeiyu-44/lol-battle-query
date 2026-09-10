@@ -22,8 +22,11 @@ const { pathToFileURL } = require('node:url');
     assert.match(await page.locator('#damageVerdict').textContent(), /^达标/);
     assert.match(await page.locator('#damageProgress').textContent(), /5 \/ 5 场/);
     assert.equal(await page.locator('.match-card .damage-top').count(), 5);
+    assert.equal(await page.locator('.match-card .damage-share').filter({hasText:'队伍占比 30.0%'}).count(), 5);
     assert.equal(await page.locator('.match-card .aug-chip').count(), 15);
     assert.equal(await page.locator('.match-card .rating-badge').count(), 5);
+    assert.equal(await page.locator('.match-card .honor-badge').count(), 5);
+    assert.match(await page.locator('.match-card .honor-badge').first().textContent(), /MVP.*估算/);
     assert.match(await page.locator('#playerRating').textContent(), /基于 5 场/);
     assert.match(await page.locator('#playerBar .friend-badge').textContent(), /好友/);
     assert.match(await page.locator('#listTitle').textContent(), /筛选 5 \/ 已加载 20/);
@@ -32,6 +35,8 @@ const { pathToFileURL } = require('node:url');
     assert.match(await page.locator('#detailTitle').textContent(), /海克斯大乱斗/);
     assert.equal(await page.locator('.copy-id').count(), 10);
     assert.equal(await page.locator('.detail-rating .rating-badge').count(), 10);
+    assert.equal(await page.locator('.dchamp .honor-mvp').count(), 1);
+    assert.equal(await page.locator('.dchamp .honor-svp').count(), 1);
     assert.equal(await page.locator('.dchamp .friend-friend').count(), 2);
     assert.equal(await page.locator('.dchamp .friend-unknown').count(), 2);
     await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable: true,
@@ -68,7 +73,7 @@ const { pathToFileURL } = require('node:url');
     assert.match(await page.locator('#analysisBody').textContent(), /1000/);
     await page.selectOption('#analysisSource', 'personal');
     await page.selectOption('#analysisChampion', '0');
-    await page.click('#loadAllBtn');
+    await page.selectOption('#historyLimit', '50');
     await page.waitForFunction(() => document.querySelectorAll('.match-card').length === 12);
     assert.equal(await page.locator('#loadMoreBtn').isDisabled(), true);
     // Both known Mayhem queue IDs; ISO timestamps, numeric strings, seconds,
@@ -116,7 +121,7 @@ const { pathToFileURL } = require('node:url');
       window.pywebview.api.get_matches = async () => ({ok: true, games: state.games, hasMore: true});
       await loadPage(20);
       return {sameDate, escaped: !escaped.includes('<img') && escaped.includes('&lt;img'), stopped,
-              duplicateStopped: !state.hasMore};
+              duplicateStopped: state.historyError.includes("重复战绩")};
     });
     assert.deepEqual(checks, {sameDate: true, escaped: true, stopped: true, duplicateStopped: true});
     assert.deepEqual(errors, []);

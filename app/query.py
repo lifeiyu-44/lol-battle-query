@@ -8,7 +8,7 @@ from .augments import clean_augments, augment_info
 from .damage import rankings, evaluate
 
 PAGE_SIZE = 20
-MAX_TOTAL = 2000  # 防御性上限，避免无限拉取
+MAX_TOTAL = 500
 
 
 def find_summoner(lcu, query):
@@ -70,9 +70,15 @@ def _norm_summoner(data):
     }
 
 
-def match_page(lcu, puuid, beg_index):
+def match_page(lcu, puuid, beg_index, count=PAGE_SIZE):
     """拉取一页战绩，返回 (slim_games, has_more)。"""
-    end_index = min(beg_index + PAGE_SIZE - 1, MAX_TOTAL)
+    if (isinstance(beg_index, bool) or not isinstance(beg_index, int) or beg_index < 0
+            or isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= PAGE_SIZE):
+        raise LcuError("战绩分页参数无效")
+    if beg_index >= MAX_TOTAL:
+        return [], False
+    count = min(count, MAX_TOTAL - beg_index)
+    end_index = beg_index + count - 1
     code, data = lcu.request(
         "GET",
         "/lol-match-history/v1/products/lol/{}/matches".format(puuid),
@@ -80,10 +86,18 @@ def match_page(lcu, puuid, beg_index):
     )
     if code != 200 or not data:
         raise LcuError("战绩接口返回异常（HTTP {}），请稍后重试。".format(code))
-    games = (data.get("games") or {}).get("games") or []
+    games = ((data.get("games") or {}).get("games") or [])[:count]
     slim = [slim_game(g, puuid) for g in games]
-    has_more = len(slim) >= PAGE_SIZE
+    has_more = len(slim) >= count and end_index + 1 < MAX_TOTAL
     return slim, has_more
+
+
+def rating_participants(game):
+    """前端用同一评分公式评选 MVP/SVP；保留缺失值，不把缺失当作零。"""
+    return [{"participantId": p.get("participantId"), "teamId": p.get("teamId"),
+             **{key: (p.get("stats") or {}).get(key) for key in
+                ("kills", "deaths", "assists", "win", "totalDamageDealtToChampions")}}
+            for p in game.get("participants") or []]
 
 
 def slim_game(g, my_puuid=""):
@@ -116,6 +130,8 @@ def slim_game(g, my_puuid=""):
     )
     return {
         "gameId": g.get("gameId"),
+        "participantId": me.get("participantId"),
+        "ratingParticipants": rating_participants(g),
         "queueId": g.get("queueId"),
         "mode": queue_name(g.get("queueId"), g.get("gameMode"), g.get("mapId")),
         "mapId": g.get("mapId"),
@@ -135,16 +151,17 @@ def slim_game(g, my_puuid=""):
     }
 
 
-def game_detail(lcu, game_id, my_puuid=""):
+def game_detail(lcu, game_id, my_puuid="", data=None):
     """单局完整对局信息（两队成员）。
 
     当前客户端版本参与者本体不再带名字，名字/puuid 在
     participantIdentities[].player 里，需要按 participantId 联表。
     my_puuid 用于标出被查询玩家所在队伍（前端据此显示我方/敌方）。
     """
-    code, data = lcu.request("GET", "/lol-match-history/v1/games/{}".format(game_id))
-    if code != 200 or not data:
-        raise LcuError("单局详情接口返回异常（HTTP {}）。".format(code))
+    if data is None:
+        code, data = lcu.request("GET", "/lol-match-history/v1/games/{}".format(game_id))
+        if code != 200 or not data:
+            raise LcuError("单局详情接口返回异常（HTTP {}）。".format(code))
     duration_ms = data.get("gameDuration") or 0
     duration_s = duration_ms // 1000 if duration_ms > 10000 else duration_ms
     identities = {}
@@ -166,6 +183,7 @@ def game_detail(lcu, game_id, my_puuid=""):
             my_team_id = p.get("teamId")
         augments = clean_augments(st)
         teams.setdefault(p.get("teamId", 100), []).append({
+            "participantId": p.get("participantId"),
             "name": ident.get("gameName") or p.get("summonerName") or "",
             "tagLine": ident.get("tagLine") or "",
             "puuid": ident.get("puuid") or "",
@@ -188,6 +206,7 @@ def game_detail(lcu, game_id, my_puuid=""):
         })
     return {
         "gameId": game_id,
+        "ratingParticipants": rating_participants(data),
         "mode": queue_name(data.get("queueId"), data.get("gameMode"), data.get("mapId")),
         "creation": data.get("gameCreation") or data.get("gameCreationDate"),
         "durationSec": duration_s,

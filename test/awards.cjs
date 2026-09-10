@@ -1,0 +1,22 @@
+const assert = require('node:assert/strict');
+const R = require('../app/ui/ratings.js');
+const players = Array.from({length:10}, (_,i)=>({participantId:i+1,teamId:i<5?100:200,
+  kills:i%5+1,deaths:2,assists:2,win:i<5}));
+const game = {durationSec:1200,ratingParticipants:players,participantId:5};
+assert.equal(R.award(game).label,'MVP');
+assert.equal(R.award(game,10).label,'SVP');
+assert.equal(R.award(game,1),null);
+assert.equal(R.award(game).tied,false);
+const clone = () => structuredClone(game);
+let test = clone(); test.ratingParticipants[3].kills=5;
+assert.equal(R.award(test,4).tied,true);
+assert.equal(R.award(test,5).tied,true);
+assert.equal(R.award({...game,remake:true}),null);
+assert.equal(R.award({...game,durationSec:0}),null);
+assert.equal(R.award({...game,ratingParticipants:players.slice(0,5)}),null);
+test=clone();test.ratingParticipants[0].kills=null;assert.equal(R.award(test),null);
+test=clone();test.ratingParticipants[0].win=false;assert.equal(R.award(test),null);
+test=clone();test.ratingParticipants.forEach(p=>p.win=true);assert.equal(R.award(test),null);
+test=clone();test.ratingParticipants[0].participantId=2;assert.equal(R.award(test),null);
+assert.equal(R.award(game,99),null);
+console.log('MVP/SVP passed: winner/loser teams, shared formula, ties, remakes, missing/invalid data.');

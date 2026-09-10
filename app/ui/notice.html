@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><link rel="stylesheet" href="style.css"><title>当前对局提醒</title></head>
+<body class="notice-page">
+<div class="notice-shell">
+  <div class="notice-top"><span>NEW MATCH DETECTED</span><span class="notice-dot"></span></div>
+  <div class="notice-title"><img src="app-icon.png" alt="乐✌认证"><div><h1>对局<span>已就绪</span></h1><b id="noticeMode">{{MODE}}</b></div></div>
+  <p class="notice-copy">双方玩家的近期战绩正在加载。<br>进入战绩终端，即可查看这一局的队友与对手。</p>
+  <div class="notice-actions"><button class="primary" onclick="pywebview.api.show_current_game()">查看当前对局 ↗</button><button class="ghost" onclick="pywebview.api.close_game_notice()">关闭提醒</button></div>
+  <p class="notice-foot">本场只提醒一次 · 关闭后仍可从主界面查看</p>
+</div>
+</body></html>
