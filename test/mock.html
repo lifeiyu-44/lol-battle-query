@@ -142,6 +142,7 @@ window.pywebview = { api: {
   get_current_game: async () => ({ok:true,active:false,teams:[]}),
   notify_current_game: async () => ({ok:true}),
   close_game_notice: async () => ({ok:true}),
+  notify_tray: async () => ({ok:true}),
   get_matches: async (puuid, beg, count=20) => {
     const heroes = [
       [1,'安妮·黑暗之女','Annie'],[412,'锤石·魂锁典狱长','Thresh'],[238,'亚索·疾风剑豪','Yasuo'],

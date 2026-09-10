@@ -43,6 +43,15 @@ def _post_conversation(lcu, target, text):
                        body={"body": text, "type": "chat"}, timeout=4)
 
 
+# 游戏内聊天接口随客户端版本演进（v1/v2、请求体形状都有差异），
+# 发送第一条时逐个探测，成功后固定沿用同一通道发剩余各条。
+GAME_CHAT_ATTEMPTS = (
+    ("/lol-game-client-chat/v1/instant-messages", {"body": "", "recipient": "team"}),
+    ("/lol-game-client-chat/v2/instant-messages", {"body": "", "recipient": "team"}),
+    ("/lol-game-client-chat/v2/instant-messages", {"body": ""}),
+)
+
+
 def send_team_review(lcu, lines):
     """一键把队友评价逐条发进当前聊天：选人阶段发选人房间，对局中发队伍频道。
 
@@ -59,37 +68,51 @@ def send_team_review(lcu, lines):
     code, phase = lcu.request("GET", "/lol-gameflow/v1/gameflow-phase", timeout=3)
     if code != 200 or not isinstance(phase, str):
         raise LcuError("暂时无法确认当前游戏阶段")
-    target = None
-    instant = False
     if phase == "ChampSelect":
         code, conversations = lcu.request("GET", "/lol-chat/v1/conversations", timeout=3)
         target = champ_select_conversation(conversations if code == 200 else None)
         if not target:
             raise LcuError("选人聊天室尚未就绪，请稍候再试")
+        transport = ("conversation", target, None)
     elif phase in ACTIVE_PHASES:
-        instant = True  # 对局中默认走游戏客户端的队伍聊天接口
+        transport = None  # 对局中：发第一条时逐个探测可用通道
     else:
         raise LcuError("当前不在选人或对局中，无法发送队友评价")
+
+    last_code = 0
+
+    def send_one(text):
+        nonlocal transport, last_code
+        if transport is None:
+            for path, template in GAME_CHAT_ATTEMPTS:
+                code, _ = lcu.request("POST", path, body={**template, "body": text}, timeout=4)
+                last_code = code
+                if code in (200, 201, 204):
+                    transport = ("game", path, template)
+                    return code
+            code2, conversations = lcu.request("GET", "/lol-chat/v1/conversations", timeout=3)
+            fallback = active_game_conversation(conversations if code2 == 200 else None)
+            if fallback:
+                transport = ("conversation", fallback, None)
+                code, _ = _post_conversation(lcu, fallback, text)
+                last_code = code
+                return code
+            return max(last_code, 404)
+        kind, first, second = transport
+        if kind == "game":
+            code, _ = lcu.request("POST", first, body={**second, "body": text}, timeout=4)
+        else:
+            code, _ = _post_conversation(lcu, first, text)
+        last_code = code
+        return code
+
     sent = 0
     for text in cleaned:
-        if instant:
-            code, _ = lcu.request("POST", "/lol-game-client-chat/v1/instant-messages",
-                                  body={"body": text, "recipient": "team"}, timeout=4)
-            if code == 404 and sent == 0:
-                # 该接口随游戏进程才可用，个别版本缺失时回退到对局聊天室会话。
-                code2, conversations = lcu.request("GET", "/lol-chat/v1/conversations", timeout=3)
-                fallback = active_game_conversation(conversations if code2 == 200 else None)
-                if fallback:
-                    target, instant = fallback, False
-                    code, _ = _post_conversation(lcu, target, text)
-                else:
-                    raise LcuError("当前对局的聊天接口不可用（HTTP 404），无法发送")
-        else:
-            code, _ = _post_conversation(lcu, target, text)
+        code = send_one(text)
         if code not in (200, 201, 204):
             if sent == 0:
-                raise LcuError("发送失败（HTTP {}），请确认聊天可用后重试".format(code))
-            raise LcuError("前 {} 条已发出，后续发送失败（HTTP {}）".format(sent, code))
+                raise LcuError("发送失败（HTTP {}），请确认聊天可用后重试".format(last_code))
+            raise LcuError("前 {} 条已发出，后续发送失败（HTTP {}）".format(sent, last_code))
         sent += 1
         time.sleep(0.3)  # 保序并避免触发聊天限速
     return {"phase": phase, "sent": sent}

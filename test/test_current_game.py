@@ -345,11 +345,14 @@ class TeamReviewTests(unittest.TestCase):
         self.assertEqual(posts[0][0][1], "/lol-game-client-chat/v1/instant-messages")
         self.assertEqual(posts[0][1]["body"], {"body": "一", "recipient": "team"})
 
-    def test_send_review_falls_back_to_game_conversation(self):
-        """对局内聊天接口缺失（404）时，回退到对局聊天室会话。"""
+    def test_send_review_falls_back_to_v2_then_conversation(self):
+        """v1 缺失时自动尝试 v2；全部候选失败后回退到对局聊天室会话。"""
         lcu = Mock()
         lcu.request.side_effect = [
-            (200, "GameStart"), (404, None),
+            (200, "GameStart"),
+            (404, None),   # v1 instant-messages
+            (400, None),   # v2 + recipient（参数形状不符）
+            (404, None),   # v2 纯 body
             (200, [{"id": "game1", "gameConversationType": "activeGame"}]),
             (200, None)]
         with patch("app.current_game.time.sleep"):
@@ -357,8 +360,26 @@ class TeamReviewTests(unittest.TestCase):
         self.assertEqual(result, {"phase": "GameStart", "sent": 1})
         posts = [c for c in lcu.request.call_args_list if c[0][0] == "POST"]
         self.assertEqual(posts[0][0][1], "/lol-game-client-chat/v1/instant-messages")
-        self.assertIn("game1", posts[1][0][1])
-        self.assertEqual(posts[1][1]["body"], {"body": "唯一一条", "type": "chat"})
+        self.assertEqual(posts[1][0][1], "/lol-game-client-chat/v2/instant-messages")
+        self.assertEqual(posts[1][1]["body"], {"body": "唯一一条", "recipient": "team"})
+        self.assertEqual(posts[2][1]["body"], {"body": "唯一一条"})
+        self.assertIn("game1", posts[3][0][1])
+        self.assertEqual(posts[3][1]["body"], {"body": "唯一一条", "type": "chat"})
+
+    def test_send_review_uses_v2_when_v1_missing(self):
+        """v1 不存在（404）时自动切换 v2 并对后续各条沿用同一通道。"""
+        lcu = Mock()
+        lcu.request.side_effect = [
+            (200, "InProgress"),
+            (404, None), (200, None), (200, None)]
+        with patch("app.current_game.time.sleep"):
+            result = C.send_team_review(lcu, ["一", "二"])
+        self.assertEqual(result, {"phase": "InProgress", "sent": 2})
+        posts = [c for c in lcu.request.call_args_list if c[0][0] == "POST"]
+        self.assertEqual(posts[0][0][1], "/lol-game-client-chat/v1/instant-messages")
+        self.assertEqual(posts[1][0][1], "/lol-game-client-chat/v2/instant-messages")
+        self.assertEqual(posts[2][0][1], "/lol-game-client-chat/v2/instant-messages")
+        self.assertEqual(posts[2][1]["body"], {"body": "二", "recipient": "team"})
 
     def test_send_review_rejects_bad_input_and_phase(self):
         lcu = Mock()
@@ -378,6 +399,14 @@ class TeamReviewTests(unittest.TestCase):
             C.send_team_review(lcu, ["x" * 500])
         post = next(c for c in lcu.request.call_args_list if c[0][0] == "POST")
         self.assertEqual(len(post[1]["body"]["body"]), C.REVIEW_MAX_CHARS)
+
+    def test_notify_tray(self):
+        api = Api()
+        api._tray_icon = Mock()
+        self.assertTrue(api.notify_tray("标题", "内容")["ok"])
+        api._tray_icon.notify.assert_called_once()
+        api._tray_icon = None
+        self.assertTrue(api.notify_tray("标题", "内容")["ok"])  # 无托盘时静默成功
 
     def test_api_send_team_review_shapes(self):
         api = Api()

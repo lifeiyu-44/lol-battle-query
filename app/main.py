@@ -285,6 +285,17 @@ class Api:
         except Exception:
             pass
 
+    def notify_tray(self, title, message):
+        """托盘气泡提醒：自动发送的结果在游戏里看不到应用内提示，用它补齐。"""
+        try:
+            if not isinstance(title, str) or not isinstance(message, str):
+                return self._fail("通知参数无效")
+            if self._tray_icon:
+                self._tray_icon.notify(message=message[:250], title=title[:60])
+            return {"ok": True}
+        except Exception as e:
+            return self._fail("通知失败：{}".format(e))
+
     def _show_main(self, icon=None, item=None):
         if self._main_window:
             try:
@@ -320,7 +331,9 @@ class Api:
         try:
             from PIL import Image
             import pystray
-            image = Image.open(resource_path("ui/app-icon.png"))
+            # 托盘图标按小尺寸重采样，直接用 512px 原图缩放会模糊发糊。
+            image = Image.open(resource_path("ui/app-icon.png")).convert("RGBA")
+            image = image.resize((32, 32), Image.LANCZOS)
 
             def checked(item):
                 return bool(self._settings.get("close_to_tray"))
@@ -339,7 +352,7 @@ class Api:
 
     NOTICE_SIZE = (460, 340)
     # 每次打包发版递增：界面左下角会显示，方便确认跑的是哪一版。
-    VERSION = "2026-09-10.8"
+    VERSION = "2026-09-10.9"
 
     def get_version(self):
         return {"ok": True, "version": self.VERSION}

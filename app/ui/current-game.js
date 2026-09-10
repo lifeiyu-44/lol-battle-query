@@ -55,8 +55,15 @@ const CurrentGame = (() => {
     reviewBusy = true; render();
     try {
       const res = await window.pywebview.api.send_team_review(lines);
-      if (res.ok) toast(`${auto ? '已自动' : '已'}把 ${res.sent} 条队友评价发进${res.phase === 'ChampSelect' ? '选人' : '对局'}聊天，署名 ${APP_NAME}`);
-      else if (!auto || !/不在选人或对局中/.test(res.error || '')) toast(res.error || '发送队友评价失败');
+      if (res.ok) {
+        toast(`${auto ? '已自动' : '已'}把 ${res.sent} 条队友评价发进${res.phase === 'ChampSelect' ? '选人' : '对局'}聊天，署名 ${APP_NAME}`);
+        // 对局中看不到应用内提示，自动发送的结果用托盘气泡再报一次。
+        if (auto) window.pywebview.api.notify_tray('队友评价已发送',
+          `已发送 ${res.sent} 条到${res.phase === 'ChampSelect' ? '选人' : '对局'}聊天（${APP_NAME}）`).catch(() => {});
+      } else {
+        toast(res.error || '发送队友评价失败');
+        if (auto) window.pywebview.api.notify_tray('队友评价未发送', res.error || '发送失败').catch(() => {});
+      }
     } catch (error) {
       toast('发送队友评价失败：' + (error && error.message || error));
     } finally { reviewBusy = false; render(); }
@@ -71,7 +78,8 @@ const CurrentGame = (() => {
       if (!autoSendOn || gameKey !== key) return;   // 对局切换、结束或功能被关闭则放弃
       const mates = ownMates();
       if (mates && (mates.every(p => p.summary || p.error) || tries >= 10)) { sendReview(true); return; }
-      if (++tries <= 10) autoSendTimer = setTimeout(attempt, 1500);
+      if (++tries <= 10) { autoSendTimer = setTimeout(attempt, 1500); return; }
+      window.pywebview.api.notify_tray('队友评价未发送', '未能获取本局名单，本局自动发送已跳过').catch(() => {});
     };
     autoSendTimer = setTimeout(attempt, 1500);
   }

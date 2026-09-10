@@ -82,6 +82,8 @@ build("""
         {teamId:200, label:'对手', players:[
           {puuid:'foe1', summonerId:'4', name:'对手甲', tagLine:'CN1', championId:1, championName:'安妮', avatar:'', friendStatus:'not_friend', isBot:false}]}]});
     window.reviewCalls = [];
+    window.notifyCalls = [];
+    api.notify_tray = async (t, m) => { window.notifyCalls.push([t, m]); return {ok:true}; };
     api.send_team_review = async (lines) => { window.reviewCalls.push(lines); return {ok:true, sent:lines.length, phase:'InProgress'}; };
     api.get_recent_summary = async (puuid, gk) => ({ok:true, games:[game(1),game(2),game(3)]});
     let gameKey = 'g1';
@@ -91,6 +93,7 @@ build("""
     await CurrentGame.refresh();
     for (let i = 0; i < 80 && window.reviewCalls.length < 1; i++) await sleep(100);
     ok('R2 进入游戏后自动发送', window.reviewCalls.length === 1);
+    ok('R2b 成功后发托盘气泡', window.notifyCalls.length === 1 && (window.notifyCalls[0][0] || '').includes('已发送'));
     const autoLines = window.reviewCalls[0] || [];
     ok('R3 标题带应用名', (autoLines[0] || '').includes('队友快评') && (autoLines[0] || '').includes('恁🐎战绩查询'));
     ok('R4 评价=标题+2队友+项目地址', autoLines.length === 4);
@@ -108,6 +111,7 @@ build("""
     await CurrentGame.refresh();
     await sleep(3000);
     ok('R10 关闭后新对局不自动发', window.reviewCalls.length === 1);
+    ok('R10b 手动发送不发气泡', window.notifyCalls.length === 1);
     // 手动点击仍可发送，内容同样带项目地址
     for (let i = 0; i < 60 && $('sendReviewBtn').disabled; i++) await sleep(50);
     $('sendReviewBtn').click();
