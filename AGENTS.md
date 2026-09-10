@@ -17,7 +17,12 @@
    # 用 .venv 的 python + psutil 找 name 含「战绩查询」的进程并 terminate
    ```
 
-4. 产物同步到交付目录：`cp -f "dist/恁🐎战绩查询.exe" "dist_new/"`。
+4. 产物同步到交付目录（两个名字都要，桌面/开机自启快捷方式指向 LOL战绩查询.exe）：
+
+   ```bash
+   cp -f "dist/恁🐎战绩查询.exe" "dist_new/"
+   cp -f "dist/恁🐎战绩查询.exe" "dist_new/LOL战绩查询.exe"
+   ```
 5. 打包后做启动冒烟：`subprocess.Popen` 拉起 exe，8 秒后确认进程仍存活再 terminate。
 
 ## 测试环境须知
